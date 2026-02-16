@@ -8,6 +8,11 @@ import Sharing
 @MainActor
 @Observable
 final class WorktreeTerminalState {
+  struct SurfaceActivity: Equatable {
+    let isVisible: Bool
+    let isFocused: Bool
+  }
+
   let tabManager: TerminalTabManager
   private let runtime: GhosttyRuntime
   private let worktree: Worktree
@@ -16,7 +21,7 @@ final class WorktreeTerminalState {
   private var trees: [TerminalTabID: SplitTree<GhosttySurfaceView>] = [:]
   private var surfaces: [UUID: GhosttySurfaceView] = [:]
   private var focusedSurfaceIdByTab: [TerminalTabID: UUID] = [:]
-  private var tabIsRunningById: [TerminalTabID: Bool] = [:]
+  var tabIsRunningById: [TerminalTabID: Bool] = [:]
   private var runScriptTabId: TerminalTabID?
   private var pendingSetupScript: Bool
   private var isEnsuringInitialTab = false
@@ -57,12 +62,8 @@ final class WorktreeTerminalState {
     surfaces[id]
   }
 
-  var focusedTaskStatus: WorktreeTaskStatus {
-    guard let tabId = tabManager.selectedTabId else { return .idle }
-    if tabIsRunningById[tabId] == true {
-      return .running
-    }
-    return .idle
+  var taskStatus: WorktreeTaskStatus {
+    tabIsRunningById.values.contains(true) ? .running : .idle
   }
 
   var isRunScriptRunning: Bool {
@@ -93,8 +94,14 @@ final class WorktreeTerminalState {
   func createTab(
     focusing: Bool = true,
     setupScript: String? = nil,
-    initialInput: String? = nil
+    initialInput: String? = nil,
+    inheritingFromSurfaceId: UUID? = nil
   ) -> TerminalTabID? {
+    let context: ghostty_surface_context_e =
+      tabManager.tabs.isEmpty
+      ? GHOSTTY_SURFACE_CONTEXT_WINDOW
+      : GHOSTTY_SURFACE_CONTEXT_TAB
+    let resolvedInheritanceSurfaceId = inheritingFromSurfaceId ?? currentFocusedSurfaceId()
     let title = "\(worktree.name) \(nextTabIndex())"
     let setupInput = setupScriptInput(setupScript: setupScript)
     let commandInput = initialInput.flatMap { runScriptInput($0) }
@@ -114,11 +121,15 @@ final class WorktreeTerminalState {
       pendingSetupScript = false
     }
     let tabId = createTab(
-      title: title,
-      icon: "terminal",
-      isTitleLocked: false,
-      initialInput: resolvedInput,
-      focusing: focusing
+      TabCreation(
+        title: title,
+        icon: "terminal",
+        isTitleLocked: false,
+        initialInput: resolvedInput,
+        focusing: focusing,
+        inheritingFromSurfaceId: resolvedInheritanceSurfaceId,
+        context: context
+      )
     )
     if shouldConsumeSetupScript, tabId != nil {
       onSetupScriptConsumed?()
@@ -133,11 +144,15 @@ final class WorktreeTerminalState {
       closeTab(existing)
     }
     let tabId = createTab(
-      title: "RUN SCRIPT",
-      icon: "play.fill",
-      isTitleLocked: true,
-      initialInput: input,
-      focusing: true
+      TabCreation(
+        title: "RUN SCRIPT",
+        icon: "play.fill",
+        isTitleLocked: true,
+        initialInput: input,
+        focusing: true,
+        inheritingFromSurfaceId: currentFocusedSurfaceId(),
+        context: GHOSTTY_SURFACE_CONTEXT_TAB
+      )
     )
     setRunScriptTabId(tabId)
     return tabId
@@ -150,17 +165,30 @@ final class WorktreeTerminalState {
     return true
   }
 
-  private func createTab(
-    title: String,
-    icon: String?,
-    isTitleLocked: Bool,
-    initialInput: String?,
-    focusing: Bool
-  ) -> TerminalTabID? {
-    let tabId = tabManager.createTab(title: title, icon: icon, isTitleLocked: isTitleLocked)
-    let tree = splitTree(for: tabId, initialInput: initialInput)
+  private struct TabCreation: Equatable {
+    let title: String
+    let icon: String?
+    let isTitleLocked: Bool
+    let initialInput: String?
+    let focusing: Bool
+    let inheritingFromSurfaceId: UUID?
+    let context: ghostty_surface_context_e
+  }
+
+  private func createTab(_ creation: TabCreation) -> TerminalTabID? {
+    let tabId = tabManager.createTab(
+      title: creation.title,
+      icon: creation.icon,
+      isTitleLocked: creation.isTitleLocked
+    )
+    let tree = splitTree(
+      for: tabId,
+      inheritingFromSurfaceId: creation.inheritingFromSurfaceId,
+      initialInput: creation.initialInput,
+      context: creation.context
+    )
     tabIsRunningById[tabId] = false
-    if focusing, let surface = tree.root?.leftmostLeaf() {
+    if creation.focusing, let surface = tree.root?.leftmostLeaf() {
       focusSurface(surface, in: tabId)
     }
     onTabCreated?()
@@ -187,16 +215,23 @@ final class WorktreeTerminalState {
     surface.insertText(text, replacementRange: NSRange(location: 0, length: 0))
   }
 
-  func syncFocus(windowIsKey: Bool) {
+  func syncFocus(windowIsKey: Bool, windowIsVisible: Bool) {
     let selectedTabId = tabManager.selectedTabId
     var surfaceToFocus: GhosttySurfaceView?
     for (tabId, tree) in trees {
       let focusedId = focusedSurfaceIdByTab[tabId]
-      let shouldFocusTab = windowIsKey && tabId == selectedTabId
+      let isSelectedTab = (tabId == selectedTabId)
       for surface in tree.leaves() {
-        let isFocused = shouldFocusTab && surface.id == focusedId
-        surface.focusDidChange(isFocused)
-        if isFocused {
+        let activity = Self.surfaceActivity(
+          isSelectedTab: isSelectedTab,
+          windowIsVisible: windowIsVisible,
+          windowIsKey: windowIsKey,
+          focusedSurfaceID: focusedId,
+          surfaceID: surface.id
+        )
+        surface.setOcclusion(activity.isVisible)
+        surface.focusDidChange(activity.isFocused)
+        if activity.isFocused {
           surfaceToFocus = surface
         }
       }
@@ -204,6 +239,18 @@ final class WorktreeTerminalState {
     if let surfaceToFocus, surfaceToFocus.window?.firstResponder is GhosttySurfaceView {
       surfaceToFocus.window?.makeFirstResponder(surfaceToFocus)
     }
+  }
+
+  static func surfaceActivity(
+    isSelectedTab: Bool,
+    windowIsVisible: Bool,
+    windowIsKey: Bool,
+    focusedSurfaceID: UUID?,
+    surfaceID: UUID
+  ) -> SurfaceActivity {
+    let isVisible = isSelectedTab && windowIsVisible
+    let isFocused = isVisible && windowIsKey && focusedSurfaceID == surfaceID
+    return SurfaceActivity(isVisible: isVisible, isFocused: isFocused)
   }
 
   @discardableResult
@@ -249,6 +296,18 @@ final class WorktreeTerminalState {
     return true
   }
 
+  @discardableResult
+  func navigateSearchOnFocusedSurface(_ direction: GhosttySearchDirection) -> Bool {
+    guard let tabId = tabManager.selectedTabId,
+      let focusedId = focusedSurfaceIdByTab[tabId],
+      let surface = surfaces[focusedId]
+    else {
+      return false
+    }
+    surface.navigateSearch(direction)
+    return true
+  }
+
   func closeTab(_ tabId: TerminalTabID) {
     let wasRunScriptTab = tabId == runScriptTabId
     removeTree(for: tabId)
@@ -289,12 +348,19 @@ final class WorktreeTerminalState {
 
   func splitTree(
     for tabId: TerminalTabID,
-    initialInput: String? = nil
+    inheritingFromSurfaceId: UUID? = nil,
+    initialInput: String? = nil,
+    context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_TAB
   ) -> SplitTree<GhosttySurfaceView> {
     if let existing = trees[tabId] {
       return existing
     }
-    let surface = createSurface(tabId: tabId, initialInput: initialInput)
+    let surface = createSurface(
+      tabId: tabId,
+      initialInput: initialInput,
+      inheritingFromSurfaceId: inheritingFromSurfaceId,
+      context: context
+    )
     let tree = SplitTree(view: surface)
     trees[tabId] = tree
     focusedSurfaceIdByTab[tabId] = surface.id
@@ -310,7 +376,12 @@ final class WorktreeTerminalState {
 
     switch action {
     case .newSplit(let direction):
-      let newSurface = createSurface(tabId: tabId, initialInput: nil)
+      let newSurface = createSurface(
+        tabId: tabId,
+        initialInput: nil,
+        inheritingFromSurfaceId: surfaceId,
+        context: GHOSTTY_SURFACE_CONTEXT_SPLIT
+      )
       do {
         let newTree = try tree.inserting(
           view: newSurface,
@@ -399,6 +470,13 @@ final class WorktreeTerminalState {
 
     case .equalize:
       trees[tabId] = tree.equalized()
+    }
+  }
+
+  func setAllSurfacesOccluded() {
+    for surface in surfaces.values {
+      surface.setOcclusion(false)
+      surface.focusDidChange(false)
     }
   }
 
@@ -498,11 +576,19 @@ final class WorktreeTerminalState {
     }
   }
 
-  private func createSurface(tabId: TerminalTabID, initialInput: String?) -> GhosttySurfaceView {
+  private func createSurface(
+    tabId: TerminalTabID,
+    initialInput: String?,
+    inheritingFromSurfaceId: UUID?,
+    context: ghostty_surface_context_e
+  ) -> GhosttySurfaceView {
+    let inherited = inheritedSurfaceConfig(fromSurfaceId: inheritingFromSurfaceId, context: context)
     let view = GhosttySurfaceView(
       runtime: runtime,
-      workingDirectory: worktree.workingDirectory,
-      initialInput: initialInput
+      workingDirectory: inherited.workingDirectory ?? worktree.workingDirectory,
+      initialInput: initialInput,
+      fontSize: inherited.fontSize,
+      context: context
     )
     view.bridge.onTitleChange = { [weak self, weak view] title in
       guard let self, let view else { return }
@@ -514,9 +600,9 @@ final class WorktreeTerminalState {
       guard let self, let view else { return false }
       return self.performSplitAction(action, for: view.id)
     }
-    view.bridge.onNewTab = { [weak self] in
-      guard let self else { return false }
-      return self.createTab() != nil
+    view.bridge.onNewTab = { [weak self, weak view] in
+      guard let self, let view else { return false }
+      return self.createTab(inheritingFromSurfaceId: view.id) != nil
     }
     view.bridge.onCloseTab = { [weak self] _ in
       guard let self else { return false }
@@ -554,6 +640,39 @@ final class WorktreeTerminalState {
     }
     surfaces[view.id] = view
     return view
+  }
+
+  private struct InheritedSurfaceConfig: Equatable {
+    let workingDirectory: URL?
+    let fontSize: Float32?
+  }
+
+  private func inheritedSurfaceConfig(
+    fromSurfaceId surfaceId: UUID?,
+    context: ghostty_surface_context_e
+  ) -> InheritedSurfaceConfig {
+    guard let surfaceId,
+      let view = surfaces[surfaceId],
+      let sourceSurface = view.surface
+    else {
+      return InheritedSurfaceConfig(workingDirectory: nil, fontSize: nil)
+    }
+
+    let inherited = ghostty_surface_inherited_config(sourceSurface, context)
+    let fontSize = inherited.font_size == 0 ? nil : inherited.font_size
+    let workingDirectory = inherited.working_directory.flatMap { ptr -> URL? in
+      let path = String(cString: ptr)
+      if path.isEmpty {
+        return nil
+      }
+      return URL(fileURLWithPath: path, isDirectory: true)
+    }
+    return InheritedSurfaceConfig(workingDirectory: workingDirectory, fontSize: fontSize)
+  }
+
+  private func currentFocusedSurfaceId() -> UUID? {
+    guard let selectedTabId = tabManager.selectedTabId else { return nil }
+    return focusedSurfaceIdByTab[selectedTabId]
   }
 
   private func updateTabTitle(for tabId: TerminalTabID) {
@@ -641,7 +760,7 @@ final class WorktreeTerminalState {
   }
 
   private func emitTaskStatusIfChanged() {
-    let newStatus = focusedTaskStatus
+    let newStatus = taskStatus
     if newStatus != lastReportedTaskStatus {
       lastReportedTaskStatus = newStatus
       onTaskStatusChanged?(newStatus)

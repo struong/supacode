@@ -18,6 +18,8 @@ final class GhosttySurfaceView: NSView, Identifiable {
   private var surfaceRef: GhosttyRuntime.SurfaceReference?
   private let workingDirectoryCString: UnsafeMutablePointer<CChar>?
   private let initialInputCString: UnsafeMutablePointer<CChar>?
+  private let fontSize: Float32
+  private let context: ghostty_surface_context_e
   private var trackingArea: NSTrackingArea?
   private var lastBackingSize: CGSize = .zero
   private var lastPerformKeyEvent: TimeInterval?
@@ -27,7 +29,10 @@ final class GhosttySurfaceView: NSView, Identifiable {
   private var keyTextAccumulator: [String]?
   private var cellSize: CGSize = .zero
   private var lastScrollbar: ScrollbarState?
+  private var lastOcclusion: Bool?
+  private var lastSurfaceFocus: Bool?
   private var eventMonitor: Any?
+  private var notificationObservers: [NSObjectProtocol] = []
   private var prevPressureStage: Int = 0
   var passwordInput: Bool = false {
     didSet {
@@ -88,9 +93,17 @@ final class GhosttySurfaceView: NSView, Identifiable {
 
   override var acceptsFirstResponder: Bool { true }
 
-  init(runtime: GhosttyRuntime, workingDirectory: URL?, initialInput: String? = nil) {
+  init(
+    runtime: GhosttyRuntime,
+    workingDirectory: URL?,
+    initialInput: String? = nil,
+    fontSize: Float32? = nil,
+    context: ghostty_surface_context_e
+  ) {
     self.runtime = runtime
     self.bridge = GhosttySurfaceBridge()
+    self.fontSize = fontSize ?? 0
+    self.context = context
     if let workingDirectory {
       let path = workingDirectory.path(percentEncoded: false)
       workingDirectoryCString = path.withCString { strdup($0) }
@@ -125,6 +138,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     if let eventMonitor {
       NSEvent.removeMonitor(eventMonitor)
     }
+    clearNotificationObservers()
     let id = ObjectIdentifier(self)
     MainActor.assumeIsolated {
       SecureInput.shared.removeScoped(id)
@@ -139,6 +153,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   func closeSurface() {
+    clearNotificationObservers()
     if let surface {
       if let surfaceRef {
         runtime.unregisterSurface(surfaceRef)
@@ -147,11 +162,46 @@ final class GhosttySurfaceView: NSView, Identifiable {
       ghostty_surface_free(surface)
       self.surface = nil
       bridge.surface = nil
+      lastOcclusion = nil
+      lastSurfaceFocus = nil
     }
+  }
+
+  private func updateScreenObservers() {
+    clearNotificationObservers()
+    guard let window else { return }
+    let center = NotificationCenter.default
+    notificationObservers.append(
+      center.addObserver(
+        forName: NSWindow.didChangeScreenNotification,
+        object: window,
+        queue: .main
+      ) { [weak self] _ in
+        self?.windowDidChangeScreen()
+      })
+  }
+
+  private func windowDidChangeScreen() {
+    guard let surface, let screen = window?.screen else { return }
+    let displayID =
+      screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0
+    ghostty_surface_set_display_id(surface, displayID)
+    DispatchQueue.main.async { [weak self] in
+      self?.viewDidChangeBackingProperties()
+    }
+  }
+
+  private func clearNotificationObservers() {
+    let center = NotificationCenter.default
+    for observer in notificationObservers {
+      center.removeObserver(observer)
+    }
+    notificationObservers.removeAll()
   }
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    updateScreenObservers()
     updateContentScale()
     updateSurfaceSize()
   }
@@ -195,6 +245,9 @@ final class GhosttySurfaceView: NSView, Identifiable {
     guard surface != nil else { return }
     guard self.focused != focused else { return }
     self.focused = focused
+    if focused {
+      bridge.state.bellCount = 0
+    }
     setSurfaceFocus(focused)
     onFocusChange?(focused)
     if passwordInput {
@@ -324,6 +377,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
       interpretKeyEvents([event])
       return
     }
+    bridge.state.bellCount = 0
     let (translationEvent, translationMods) = translationState(event, surface: surface)
     let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
     keyTextAccumulator = []
@@ -399,6 +453,9 @@ final class GhosttySurfaceView: NSView, Identifiable {
 
   override func mouseMoved(with event: NSEvent) {
     sendMousePosition(event)
+    if let window, window.isKeyWindow, !focused, runtime.focusFollowsMouse() {
+      requestFocus()
+    }
   }
 
   override func mouseEntered(with event: NSEvent) {
@@ -422,6 +479,9 @@ final class GhosttySurfaceView: NSView, Identifiable {
   override func mouseUp(with event: NSEvent) {
     prevPressureStage = 0
     sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
+    if let surface {
+      ghostty_surface_mouse_pressure(surface, 0, 0)
+    }
   }
 
   override func rightMouseDown(with event: NSEvent) {
@@ -449,11 +509,28 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   override func otherMouseDown(with event: NSEvent) {
-    sendMouseButton(event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_MIDDLE)
+    sendMouseButton(event, state: GHOSTTY_MOUSE_PRESS, button: Self.ghosttyMouseButton(from: event.buttonNumber))
   }
 
   override func otherMouseUp(with event: NSEvent) {
-    sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_MIDDLE)
+    sendMouseButton(event, state: GHOSTTY_MOUSE_RELEASE, button: Self.ghosttyMouseButton(from: event.buttonNumber))
+  }
+
+  private static func ghosttyMouseButton(from buttonNumber: Int) -> ghostty_input_mouse_button_e {
+    switch buttonNumber {
+    case 0: GHOSTTY_MOUSE_LEFT
+    case 1: GHOSTTY_MOUSE_RIGHT
+    case 2: GHOSTTY_MOUSE_MIDDLE
+    case 3: GHOSTTY_MOUSE_EIGHT
+    case 4: GHOSTTY_MOUSE_NINE
+    case 5: GHOSTTY_MOUSE_SIX
+    case 6: GHOSTTY_MOUSE_SEVEN
+    case 7: GHOSTTY_MOUSE_FOUR
+    case 8: GHOSTTY_MOUSE_FIVE
+    case 9: GHOSTTY_MOUSE_TEN
+    case 10: GHOSTTY_MOUSE_ELEVEN
+    default: GHOSTTY_MOUSE_UNKNOWN
+    }
   }
 
   override func mouseDragged(with event: NSEvent) {
@@ -613,11 +690,14 @@ final class GhosttySurfaceView: NSView, Identifiable {
         nsview: Unmanaged.passUnretained(self).toOpaque()
       ))
     config.scale_factor = backingScaleFactor()
+    config.font_size = fontSize
     config.working_directory = workingDirectoryCString.map { UnsafePointer($0) }
     config.initial_input = initialInputCString.map { UnsafePointer($0) }
-    config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+    config.context = context
     surface = ghostty_surface_new(app, &config)
     bridge.surface = surface
+    lastOcclusion = nil
+    lastSurfaceFocus = nil
     updateSurfaceSize()
   }
 
@@ -637,8 +717,21 @@ final class GhosttySurfaceView: NSView, Identifiable {
     return 2.0
   }
 
+  func setOcclusion(_ visible: Bool) {
+    guard let surface else { return }
+    if lastOcclusion == visible {
+      return
+    }
+    lastOcclusion = visible
+    ghostty_surface_set_occlusion(surface, visible)
+  }
+
   private func setSurfaceFocus(_ focused: Bool) {
     guard let surface else { return }
+    if lastSurfaceFocus == focused {
+      return
+    }
+    lastSurfaceFocus = focused
     ghostty_surface_set_focus(surface, focused)
   }
 

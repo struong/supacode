@@ -15,12 +15,14 @@ struct WorktreeDetailView: View {
     let repositories = state.repositories
     let selectedRow = repositories.selectedRow(for: repositories.selectedWorktreeID)
     let selectedWorktree = repositories.worktree(for: repositories.selectedWorktreeID)
-    let loadingInfo = loadingInfo(for: selectedRow, repositories: repositories)
+    let loadingInfo = loadingInfo(
+      for: selectedRow,
+      selectedWorktreeID: repositories.selectedWorktreeID,
+      repositories: repositories
+    )
     let hasActiveWorktree = selectedWorktree != nil && loadingInfo == nil
     let openActionSelection = state.openActionSelection
-    let runScriptConfigured =
-      !state.selectedRunScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    let runScriptEnabled = hasActiveWorktree && runScriptConfigured
+    let runScriptEnabled = hasActiveWorktree
     let runScriptIsRunning = selectedWorktree.flatMap { state.runScriptStatusByWorktreeID[$0.id] } == true
     let notificationGroups = repositories.toolbarNotificationGroups(terminalManager: terminalManager)
     let unseenNotificationWorktreeCount = notificationGroups.reduce(0) { count, repository in
@@ -318,6 +320,7 @@ struct WorktreeDetailView: View {
 
   private func loadingInfo(
     for selectedRow: WorktreeRowModel?,
+    selectedWorktreeID: Worktree.ID?,
     repositories: RepositoriesFeature.State
   ) -> WorktreeLoadingInfo? {
     guard let selectedRow else { return nil }
@@ -326,14 +329,21 @@ struct WorktreeDetailView: View {
       return WorktreeLoadingInfo(
         name: selectedRow.name,
         repositoryName: repositoryName,
-        state: .removing
+        state: .removing,
+        statusTitle: nil,
+        statusDetail: nil
       )
     }
     if selectedRow.isPending {
+      let pending = repositories.pendingWorktree(for: selectedWorktreeID)
+      let progress = pending?.progress
+      let displayName = progress?.worktreeName ?? selectedRow.name
       return WorktreeLoadingInfo(
-        name: selectedRow.name,
+        name: displayName,
         repositoryName: repositoryName,
-        state: .creating
+        state: .creating,
+        statusTitle: progress?.titleText ?? selectedRow.name,
+        statusDetail: progress?.detailText ?? selectedRow.detail
       )
     }
     return nil

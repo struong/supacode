@@ -10,6 +10,7 @@ struct WorktreeCommands: Commands {
   @FocusedValue(\.deleteWorktreeAction) private var deleteWorktreeAction
   @FocusedValue(\.runScriptAction) private var runScriptAction
   @FocusedValue(\.stopRunScriptAction) private var stopRunScriptAction
+  @FocusedValue(\.visibleHotkeyWorktreeRows) private var visibleHotkeyWorktreeRows
 
   init(store: StoreOf<AppFeature>) {
     self.store = store
@@ -17,12 +18,31 @@ struct WorktreeCommands: Commands {
 
   var body: some Commands {
     let repositories = store.repositories
-    let orderedRows = repositories.orderedWorktreeRows()
+    let orderedRows = visibleHotkeyWorktreeRows ?? repositories.orderedWorktreeRows()
     let pullRequestURL = selectedPullRequestURL
     let githubIntegrationEnabled = store.settings.githubIntegrationEnabled
     let archiveShortcut = KeyboardShortcut(.delete, modifiers: .command).display
     let deleteShortcut = KeyboardShortcut(.delete, modifiers: [.command, .shift]).display
     CommandMenu("Worktrees") {
+      Button("Select Next Worktree") {
+        store.send(.repositories(.selectNextWorktree))
+      }
+      .keyboardShortcut(
+        AppShortcuts.selectNextWorktree.keyEquivalent,
+        modifiers: AppShortcuts.selectNextWorktree.modifiers
+      )
+      .help("Select Next Worktree (\(AppShortcuts.selectNextWorktree.display))")
+      .disabled(orderedRows.isEmpty)
+      Button("Select Previous Worktree") {
+        store.send(.repositories(.selectPreviousWorktree))
+      }
+      .keyboardShortcut(
+        AppShortcuts.selectPreviousWorktree.keyEquivalent,
+        modifiers: AppShortcuts.selectPreviousWorktree.modifiers
+      )
+      .help("Select Previous Worktree (\(AppShortcuts.selectPreviousWorktree.display))")
+      .disabled(orderedRows.isEmpty)
+      Divider()
       ForEach(worktreeShortcuts.indices, id: \.self) { index in
         let shortcut = worktreeShortcuts[index]
         worktreeShortcutButton(index: index, shortcut: shortcut, orderedRows: orderedRows)
@@ -201,6 +221,11 @@ extension FocusedValues {
     get { self[StopRunScriptActionKey.self] }
     set { self[StopRunScriptActionKey.self] = newValue }
   }
+
+  var visibleHotkeyWorktreeRows: [WorktreeRowModel]? {
+    get { self[VisibleHotkeyWorktreeRowsKey.self] }
+    set { self[VisibleHotkeyWorktreeRowsKey.self] = newValue }
+  }
 }
 
 private struct RunScriptActionKey: FocusedValueKey {
@@ -209,4 +234,8 @@ private struct RunScriptActionKey: FocusedValueKey {
 
 private struct StopRunScriptActionKey: FocusedValueKey {
   typealias Value = () -> Void
+}
+
+private struct VisibleHotkeyWorktreeRowsKey: FocusedValueKey {
+  typealias Value = [WorktreeRowModel]
 }

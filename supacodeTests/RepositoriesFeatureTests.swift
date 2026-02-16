@@ -95,6 +95,97 @@ struct RepositoriesFeatureTests {
     }
   }
 
+  @Test func pendingProgressUpdateUpdatesPendingWorktreeState() async {
+    let repoRoot = "/tmp/repo"
+    let repository = makeRepository(
+      id: repoRoot,
+      worktrees: [makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)]
+    )
+    let pendingID = "pending:test"
+    var state = makeState(repositories: [repository])
+    state.selection = .worktree(pendingID)
+    state.pendingWorktrees = [
+      PendingWorktree(
+        id: pendingID,
+        repositoryID: repository.id,
+        progress: WorktreeCreationProgress(stage: .loadingLocalBranches)
+      ),
+    ]
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    let nextProgress = WorktreeCreationProgress(
+      stage: .creatingWorktree,
+      worktreeName: "swift-otter",
+      baseRef: "origin/main",
+      copyIgnored: false,
+      copyUntracked: true
+    )
+    await store.send(
+      .pendingWorktreeProgressUpdated(
+        id: pendingID,
+        progress: nextProgress
+      )
+    ) {
+      $0.pendingWorktrees[0].progress = nextProgress
+    }
+  }
+
+  @Test func pendingProgressUpdateIsIgnoredAfterCreateFailureRemovesPendingWorktree() async {
+    let repoRoot = "/tmp/repo"
+    let repository = makeRepository(id: repoRoot, worktrees: [makeWorktree(id: repoRoot, name: "main")])
+    let pendingID = "pending:test"
+    var state = makeState(repositories: [repository])
+    state.selection = .worktree(pendingID)
+    state.pendingWorktrees = [
+      PendingWorktree(
+        id: pendingID,
+        repositoryID: repository.id,
+        progress: WorktreeCreationProgress(
+          stage: .checkingRepositoryMode,
+          worktreeName: "swift-otter"
+        )
+      ),
+    ]
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    let expectedAlert = AlertState<RepositoriesFeature.Alert> {
+      TextState("Unable to create worktree")
+    } actions: {
+      ButtonState(role: .cancel) {
+        TextState("OK")
+      }
+    } message: {
+      TextState("boom")
+    }
+
+    await store.send(
+      .createRandomWorktreeFailed(
+        title: "Unable to create worktree",
+        message: "boom",
+        pendingID: pendingID,
+        previousSelection: nil,
+        repositoryID: repository.id,
+        name: nil
+      )
+    ) {
+      $0.pendingWorktrees = []
+      $0.selection = nil
+      $0.alert = expectedAlert
+    }
+
+    await store.send(
+      .pendingWorktreeProgressUpdated(
+        id: pendingID,
+        progress: WorktreeCreationProgress(stage: .creatingWorktree)
+      )
+    )
+    #expect(store.state.pendingWorktrees.isEmpty)
+  }
+
   @Test func requestDeleteWorktreeShowsConfirmation() async {
     let worktree = makeWorktree(id: "/tmp/wt", name: "owl")
     let repository = makeRepository(id: "/tmp/repo", worktrees: [worktree])
@@ -385,6 +476,30 @@ struct RepositoriesFeatureTests {
     )
   }
 
+  @Test func orderedWorktreeRowsCanFilterCollapsedRepositoriesForHotkeys() {
+    let repoA = makeRepository(
+      id: "/tmp/repo-a",
+      worktrees: [
+        makeWorktree(id: "/tmp/repo-a/wt1", name: "wt1", repoRoot: "/tmp/repo-a")
+      ]
+    )
+    let repoB = makeRepository(
+      id: "/tmp/repo-b",
+      worktrees: [
+        makeWorktree(id: "/tmp/repo-b/wt2", name: "wt2", repoRoot: "/tmp/repo-b")
+      ]
+    )
+    var state = makeState(repositories: [repoA, repoB])
+    state.repositoryOrderIDs = [repoA.id, repoB.id]
+
+    expectNoDifference(
+      state.orderedWorktreeRows(includingRepositoryIDs: [repoB.id]).map(\.id),
+      [
+        "/tmp/repo-b/wt2"
+      ]
+    )
+  }
+
   @Test func orderedRepositoryRootsAppendMissing() {
     let repoA = makeRepository(id: "/tmp/repo-a", worktrees: [])
     let repoB = makeRepository(id: "/tmp/repo-b", worktrees: [])
@@ -613,8 +728,7 @@ struct RepositoriesFeatureTests {
       PendingWorktree(
         id: removedWorktree.id,
         repositoryID: repository.id,
-        name: "pending",
-        detail: ""
+        progress: WorktreeCreationProgress(stage: .choosingWorktreeName)
       ),
     ]
     initialState.pinnedWorktreeIDs = [removedWorktree.id]
@@ -697,8 +811,7 @@ struct RepositoriesFeatureTests {
       PendingWorktree(
         id: pendingID,
         repositoryID: repository.id,
-        name: "Creating worktree...",
-        detail: ""
+        progress: WorktreeCreationProgress(stage: .loadingLocalBranches)
       ),
     ]
     initialState.selection = .worktree(pendingID)
@@ -794,6 +907,94 @@ struct RepositoriesFeatureTests {
 
     await store.send(.unarchiveWorktree(worktree.id))
     expectNoDifference(store.state.archivedWorktreeIDs, [])
+  }
+
+  // MARK: - Select Next/Previous Worktree
+
+  @Test func selectNextWorktreeWrapsForward() async {
+    let wt1 = makeWorktree(id: "/tmp/wt1", name: "alpha")
+    let wt2 = makeWorktree(id: "/tmp/wt2", name: "beta")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [wt1, wt2])
+    var state = makeState(repositories: [repository])
+    state.selection = .worktree(wt2.id)
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectNextWorktree)
+    await store.receive(\.selectWorktree) {
+      $0.selection = .worktree(wt1.id)
+    }
+    await store.receive(\.delegate.selectedWorktreeChanged)
+  }
+
+  @Test func selectPreviousWorktreeWrapsBackward() async {
+    let wt1 = makeWorktree(id: "/tmp/wt1", name: "alpha")
+    let wt2 = makeWorktree(id: "/tmp/wt2", name: "beta")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [wt1, wt2])
+    var state = makeState(repositories: [repository])
+    state.selection = .worktree(wt1.id)
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectPreviousWorktree)
+    await store.receive(\.selectWorktree) {
+      $0.selection = .worktree(wt2.id)
+    }
+    await store.receive(\.delegate.selectedWorktreeChanged)
+  }
+
+  @Test func selectNextWorktreeWithNoSelectionSelectsFirst() async {
+    let wt1 = makeWorktree(id: "/tmp/wt1", name: "alpha")
+    let wt2 = makeWorktree(id: "/tmp/wt2", name: "beta")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [wt1, wt2])
+    let store = TestStore(initialState: makeState(repositories: [repository])) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectNextWorktree)
+    await store.receive(\.selectWorktree) {
+      $0.selection = .worktree(wt1.id)
+    }
+    await store.receive(\.delegate.selectedWorktreeChanged)
+  }
+
+  @Test func selectPreviousWorktreeWithNoSelectionSelectsLast() async {
+    let wt1 = makeWorktree(id: "/tmp/wt1", name: "alpha")
+    let wt2 = makeWorktree(id: "/tmp/wt2", name: "beta")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [wt1, wt2])
+    let store = TestStore(initialState: makeState(repositories: [repository])) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectPreviousWorktree)
+    await store.receive(\.selectWorktree) {
+      $0.selection = .worktree(wt2.id)
+    }
+    await store.receive(\.delegate.selectedWorktreeChanged)
+  }
+
+  @Test func selectNextWorktreeWithEmptyRowsIsNoOp() async {
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectNextWorktree)
+  }
+
+  @Test func selectNextWorktreeSingleWorktreeReturnsSame() async {
+    let worktree = makeWorktree(id: "/tmp/wt", name: "solo")
+    let repository = makeRepository(id: "/tmp/repo", worktrees: [worktree])
+    var state = makeState(repositories: [repository])
+    state.selection = .worktree(worktree.id)
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    await store.send(.selectNextWorktree)
+    await store.receive(\.selectWorktree)
+    await store.receive(\.delegate.selectedWorktreeChanged)
   }
 
   private func makeWorktree(
