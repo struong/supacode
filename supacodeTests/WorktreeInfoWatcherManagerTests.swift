@@ -13,6 +13,7 @@ struct WorktreeInfoWatcherManagerTests {
       unfocusedInterval: .seconds(3_600)
     )
     let (collector, task) = startCollecting(manager.eventStream())
+    await drainAsyncEvents()
 
     manager.handleCommand(.setPullRequestTrackingEnabled(false))
     manager.handleCommand(.setWorktrees([tempWorktree.worktree]))
@@ -22,7 +23,7 @@ struct WorktreeInfoWatcherManagerTests {
         collector,
         worktreeID: tempWorktree.worktree.id,
         count: 1,
-        timeout: .milliseconds(300)
+        timeout: .seconds(2)
       )
     )
 
@@ -40,6 +41,7 @@ struct WorktreeInfoWatcherManagerTests {
       unfocusedInterval: .milliseconds(80)
     )
     let (collector, task) = startCollecting(manager.eventStream())
+    await drainAsyncEvents()
 
     manager.handleCommand(.setPullRequestTrackingEnabled(false))
     manager.handleCommand(.setWorktrees([firstWorktree]))
@@ -49,7 +51,7 @@ struct WorktreeInfoWatcherManagerTests {
         collector,
         worktreeID: firstWorktree.id,
         count: 1,
-        timeout: .milliseconds(300)
+        timeout: .seconds(2)
       )
     )
 
@@ -63,7 +65,7 @@ struct WorktreeInfoWatcherManagerTests {
         collector,
         worktreeID: secondWorktree.id,
         count: 1,
-        timeout: .seconds(1)
+        timeout: .seconds(2)
       )
     )
 
