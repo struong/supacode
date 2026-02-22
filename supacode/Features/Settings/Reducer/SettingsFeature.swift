@@ -20,6 +20,7 @@ struct SettingsFeature {
     var deleteBranchOnDeleteWorktree: Bool
     var automaticallyArchiveMergedWorktrees: Bool
     var promptForWorktreeCreation: Bool
+    var shortcutOverrides: [String: AppShortcutOverride]
     var selection: SettingsSection? = .general
     var repositorySettings: RepositorySettingsFeature.State?
 
@@ -40,6 +41,7 @@ struct SettingsFeature {
       deleteBranchOnDeleteWorktree = settings.deleteBranchOnDeleteWorktree
       automaticallyArchiveMergedWorktrees = settings.automaticallyArchiveMergedWorktrees
       promptForWorktreeCreation = settings.promptForWorktreeCreation
+      shortcutOverrides = settings.shortcutOverrides
     }
 
     var globalSettings: GlobalSettings {
@@ -58,7 +60,8 @@ struct SettingsFeature {
         githubIntegrationEnabled: githubIntegrationEnabled,
         deleteBranchOnDeleteWorktree: deleteBranchOnDeleteWorktree,
         automaticallyArchiveMergedWorktrees: automaticallyArchiveMergedWorktrees,
-        promptForWorktreeCreation: promptForWorktreeCreation
+        promptForWorktreeCreation: promptForWorktreeCreation,
+        shortcutOverrides: shortcutOverrides
       )
     }
   }
@@ -67,6 +70,7 @@ struct SettingsFeature {
     case task
     case settingsLoaded(GlobalSettings)
     case setSelection(SettingsSection?)
+    case setShortcutOverride(name: String, override: AppShortcutOverride?)
     case repositorySettings(RepositorySettingsFeature.Action)
     case delegate(Delegate)
     case binding(BindingAction<State>)
@@ -114,6 +118,7 @@ struct SettingsFeature {
         state.deleteBranchOnDeleteWorktree = normalizedSettings.deleteBranchOnDeleteWorktree
         state.automaticallyArchiveMergedWorktrees = normalizedSettings.automaticallyArchiveMergedWorktrees
         state.promptForWorktreeCreation = normalizedSettings.promptForWorktreeCreation
+        state.shortcutOverrides = normalizedSettings.shortcutOverrides
         return .send(.delegate(.settingsChanged(normalizedSettings)))
 
       case .binding:
@@ -128,6 +133,17 @@ struct SettingsFeature {
       case .setSelection(let selection):
         state.selection = selection ?? .general
         return .none
+
+      case .setShortcutOverride(let name, let override):
+        if let override {
+          state.shortcutOverrides[name] = override
+        } else {
+          state.shortcutOverrides.removeValue(forKey: name)
+        }
+        let settings = state.globalSettings
+        @Shared(.settingsFile) var settingsFile
+        $settingsFile.withLock { $0.global = settings }
+        return .send(.delegate(.settingsChanged(settings)))
 
       case .repositorySettings:
         return .none
