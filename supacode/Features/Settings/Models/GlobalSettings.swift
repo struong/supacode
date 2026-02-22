@@ -14,6 +14,7 @@ nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   var deleteBranchOnDeleteWorktree: Bool
   var automaticallyArchiveMergedWorktrees: Bool
   var promptForWorktreeCreation: Bool
+  var shortcutOverrides: [String: AppShortcutOverride]
 
   static let `default` = GlobalSettings(
     appearanceMode: .dark,
@@ -30,7 +31,8 @@ nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     githubIntegrationEnabled: true,
     deleteBranchOnDeleteWorktree: true,
     automaticallyArchiveMergedWorktrees: false,
-    promptForWorktreeCreation: true
+    promptForWorktreeCreation: true,
+    shortcutOverrides: [:]
   )
 
   init(
@@ -48,7 +50,8 @@ nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     githubIntegrationEnabled: Bool,
     deleteBranchOnDeleteWorktree: Bool,
     automaticallyArchiveMergedWorktrees: Bool,
-    promptForWorktreeCreation: Bool
+    promptForWorktreeCreation: Bool,
+    shortcutOverrides: [String: AppShortcutOverride] = [:]
   ) {
     self.appearanceMode = appearanceMode
     self.defaultEditorID = defaultEditorID
@@ -65,6 +68,7 @@ nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.deleteBranchOnDeleteWorktree = deleteBranchOnDeleteWorktree
     self.automaticallyArchiveMergedWorktrees = automaticallyArchiveMergedWorktrees
     self.promptForWorktreeCreation = promptForWorktreeCreation
+    self.shortcutOverrides = shortcutOverrides
   }
 
   init(from decoder: any Decoder) throws {
@@ -108,5 +112,8 @@ nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     promptForWorktreeCreation =
       try container.decodeIfPresent(Bool.self, forKey: .promptForWorktreeCreation)
       ?? Self.default.promptForWorktreeCreation
+    shortcutOverrides =
+      try container.decodeIfPresent([String: AppShortcutOverride].self, forKey: .shortcutOverrides)
+      ?? Self.default.shortcutOverrides
   }
 }
